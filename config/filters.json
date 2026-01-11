@@ -1,5 +1,6 @@
 {
   "auto_analyze": true,
   "audio_codec": "aac",
-  "audio_bitrate": "192k"
+  "audio_bitrate": "192k",
+  "profile": "aggressive"
 }

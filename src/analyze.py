@@ -10,6 +10,7 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
     Анализирует аудиодорожку видеофайла и возвращает параметры.
     """
     try:
+        # Получаем базовую информацию через ffprobe
         probe_cmd = [
             "ffprobe",
             "-v",
@@ -37,13 +38,12 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
         duration = float(stream_info.get("duration", 0))
 
     except Exception:
-        print(
-            "Не удалось получить информацию о файле, использую значения по умолчанию."
-        )
+        # Если не можем получить базовую информацию, используем дефолты
         sample_rate = 48000
         channels = 2
         duration = 30.0
 
+    # Анализ статистики с помощью astats
     stats_cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -57,9 +57,11 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
     ]
     stats_result = subprocess.run(stats_cmd, capture_output=True, text=True)
 
+    # Парсим RMS и пиковые значения
     rms_level = _parse_rms_from_output(stats_result.stderr)
     peak_level = _parse_peak_from_output(stats_result.stderr)
 
+    # Анализ громкости
     volume_cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -73,11 +75,16 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
     ]
     volume_result = subprocess.run(volume_cmd, capture_output=True, text=True)
     mean_volume = _parse_mean_volume(volume_result.stderr)
-    max_volume = _parse_max_volume(volume_result.stderr)
-    clipping_detected = peak_level > -0.1
+
+    # Детект клиппинга
+    clipping_detected = peak_level > -0.1 if peak_level else False
+
+    # Оценка динамического диапазона
     dynamic_range = abs(peak_level - rms_level) if (peak_level and rms_level) else 20.0
 
-    noise_level = _estimate_noise_level(rms_level, dynamic_range, mean_volume)
+    # Определяем уровень шума
+    noise_level = _estimate_noise_level(rms_level, dynamic_range)
+
     analysis = {
         "sample_rate": sample_rate,
         "channels": channels,
@@ -87,7 +94,6 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
         "mean_volume_db": mean_volume,
         "dynamic_range_db": dynamic_range,
         "clipping_detected": clipping_detected,
-        "max_volume_db": max_volume,
         "noise_level": noise_level,
     }
 
@@ -95,35 +101,31 @@ def analyze_audio(input_path: Path) -> Dict[str, Any]:
 
 
 def _parse_rms_from_output(stderr: str) -> float:
-    matches = re.findall(r"RMS level dB:\s*([-\d.]+)", stderr)
-    vals = []
-    for v in matches:
-        try:
-            vals.append(float(v))
-        except ValueError:
-            continue
-    return sum(vals) / len(vals) if vals else -30.0
-
-
-def _parse_max_volume(stderr: str) -> float:
-    match = re.search(r"max_volume:\s*([-\d.]+)\s*dB", stderr)
+    """Извлекает RMS уровень из вывода astats."""
+    match = re.search(r"RMS level dB:\s*([-\d.]+)", stderr)
     if match:
         try:
-            return float(match.group(1))
+            value = match.group(1)
+            if value == "-":
+                return -30.0
+            return float(value)
         except ValueError:
-            return 0.0
-    return 0.0
+            return -30.0
+    return -30.0
 
 
 def _parse_peak_from_output(stderr: str) -> float:
-    matches = re.findall(r"Peak level dB:\s*([-\d.]+)", stderr)
-    vals = []
-    for v in matches:
+    """Извлекает пиковый уровень."""
+    match = re.search(r"Peak level dB:\s*([-\d.]+)", stderr)
+    if match:
         try:
-            vals.append(float(v))
+            value = match.group(1)
+            if value == "-":
+                return -3.0
+            return float(value)
         except ValueError:
-            continue
-    return max(vals) if vals else -3.0
+            return -3.0
+    return -3.0
 
 
 def _parse_mean_volume(stderr: str) -> float:
@@ -140,125 +142,104 @@ def _parse_mean_volume(stderr: str) -> float:
     return -20.0
 
 
-def _estimate_noise_level(
-    rms_level: float, dynamic_range: float, mean_volume: float
-) -> str:
-    if rms_level > -12 and dynamic_range < 8 and mean_volume > -14:
+def _estimate_noise_level(rms_level: float, dynamic_range: float) -> str:
+    """
+    Оценивает уровень шума:
+    - high: громкая музыка/шум, мало динамики
+    - medium: средний уровень
+    - low: чистая запись
+    """
+    if rms_level > -15 and dynamic_range < 10:
         return "high"
-    elif rms_level > -22 and dynamic_range < 18:
+    elif rms_level > -25 and dynamic_range < 20:
         return "medium"
     else:
         return "low"
 
 
-def suggest_filter_config(
-    analysis: Dict[str, Any],
-    profile: str = "light",
-) -> Dict[str, Any]:
+def suggest_filter_config(analysis):
     """
-    Генерирует конфигурацию фильтров для речевых видео.
-    Профили:
-      - light: мягкая очистка + выравнивание
-      - aggressive: более сильное шумоподавление и контроль динамики
+    HQ профиль: максимум качества без ML.
     """
-    noise_level = analysis.get("noise_level", "medium")
+    noise_level = analysis["noise_level"]
 
-    config = {
-        "audio_codec": "aac",
-        "audio_bitrate": "192k" if profile == "light" else "256k",
-        "audio_filters": [],
-    }
+    # Параметры подавления зависят от шума
 
-    if profile == "light":
-        hp_freq = 80 if noise_level == "low" else 90
+    if noise_level == "high":
+        afftdn = {"nr": 10, "nf": -45, "rf": -55}
+    elif noise_level == "medium":
+        afftdn = {"nr": 8, "nf": -50, "rf": -60}
     else:
-        hp_freq = 100 if noise_level == "low" else 120
+        afftdn = {"nr": 6, "nf": -60, "rf": -70}
 
-    config["audio_filters"].append({"name": "highpass", "args": {"f": hp_freq, "p": 1}})
-
-    if noise_level != "low":
-        lp_freq = 14000 if profile == "light" else 12000
-        config["audio_filters"].append(
+    return {
+        "audio_codec": "aac",
+        "audio_bitrate": "192k",
+        "audio_filters": [
+            # 1. В моно (снижает фазовую музыку)
             {
-                "name": "lowpass",
-                "args": {"f": lp_freq, "p": 1},
-            }
-        )
-
-    if noise_level != "low":
-        if profile == "light":
-            afftdn_args = {
-                "nr": 4,
-                "nf": -35,
-            }
-        else:
-            afftdn_args = {
-                "nr": 6,
-                "nf": -30,
-                "tn": 1,
-            }
-
-        config["audio_filters"].append(
+                "name": "pan",
+                "args": {"args": "mono|c0=0.5*c0+0.5*c1"},
+            },
+            # 2. МЯГКО формируем речь (НЕ режем топором)
+            {"name": "highpass", "args": {"f": 80}},
+            {"name": "lowpass", "args": {"f": 6000}},
+            # 3. Лёгкое подавление мути
+            {
+                "name": "equalizer",
+                "args": {"f": 300, "width_type": "o", "width": 1.0, "g": -1.5},
+            },
+            # 4. Подчёркиваем разборчивость
+            {
+                "name": "equalizer",
+                "args": {"f": 1800, "width_type": "o", "width": 1.0, "g": 3},
+            },
+            {
+                "name": "equalizer",
+                "args": {"f": 4200, "width_type": "o", "width": 0.8, "g": 2},
+            },
+            # 5. Основное шумоподавление (ЛУЧШЕ afftdn)
             {
                 "name": "afftdn",
-                "args": afftdn_args,
-            }
-        )
-
-    if profile == "light":
-        comp_args = {
-            "threshold": "-20dB",
-            "ratio": 2.5,
-            "attack": 10,
-            "release": 120,
-            "makeup": 2,
-        }
-    else:
-        comp_args = {
-            "threshold": "-22dB",
-            "ratio": 3,
-            "attack": 8,
-            "release": 120,
-            "makeup": 3,
-        }
-
-    config["audio_filters"].append(
-        {
-            "name": "acompressor",
-            "args": comp_args,
-        }
-    )
-
-    if profile == "aggressive" and noise_level in ("medium", "high"):
-        config["audio_filters"].append(
+                "args": afftdn,
+            },
+            # 6. Downward expander вместо gate
             {
                 "name": "agate",
                 "args": {
-                    "threshold": 0.005,
-                    "ratio": 4,
+                    "threshold": 0.02,
+                    "ratio": 3,
                     "attack": 5,
-                    "release": 150,
-                    "knee": 2,
-                    "detection": "rms",
-                    "link": "average",
+                    "release": 200,
                 },
-            }
-        )
-
-    loudnorm_args = {
-        "I": -16,
-        "LRA": 11,
-        "TP": -1.5,
+            },
+            # 7. Мягкая компрессия речи
+            {
+                "name": "acompressor",
+                "args": {
+                    "threshold": "-22dB",
+                    "ratio": 2.5,
+                    "attack": 8,
+                    "release": 90,
+                    "makeup": 4,
+                },
+            },
+            # 8. Loudness (без убийства динамики)
+            {
+                "name": "loudnorm",
+                "args": {
+                    "I": -18,
+                    "LRA": 9,
+                    "TP": -1.2,
+                },
+            },
+            # 9. Safety limiter
+            {
+                "name": "alimiter",
+                "args": {"limit": 0.98, "attack": 2, "release": 60},
+            },
+        ],
     }
-
-    config["audio_filters"].append(
-        {
-            "name": "loudnorm",
-            "args": loudnorm_args,
-        }
-    )
-
-    return config
 
 
 def validate_output(input_path: Path, output_path: Path) -> Tuple[bool, str]:
@@ -284,12 +265,14 @@ def validate_output(input_path: Path, output_path: Path) -> Tuple[bool, str]:
         input_duration = get_duration(input_path)
         output_duration = get_duration(output_path)
 
+        # Проверка синхронизации (допуск 0.1 сек)
         if abs(input_duration - output_duration) > 0.1:
             return (
                 False,
                 f"Рассинхрон: вход={input_duration:.2f}s, выход={output_duration:.2f}s",
             )
 
+        # Проверка клиппинга
         stats_cmd = [
             "ffmpeg",
             "-hide_banner",
