@@ -1,0 +1,18 @@
+services:
+  voice_cleaner:
+    build:
+      context: .
+      dockerfile: Dockerfile 
+    container_name: voice_cleaner
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./src:/app/src
+      - ./voice_cleaner.py:/app/voice_cleaner.py
+    environment:
+      - PYTHONPATH=/app
+      - MPLBACKEND=Agg
+      - DISPLAY=:99
+    working_dir: /app
+    stdin_open: true
+    tty: true
