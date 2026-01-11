@@ -3,21 +3,49 @@ from typing import Any, Dict, List
 
 def build_filter_chain_string(filters_cfg: List[Dict[str, Any]]) -> str:
     """
-    Из списка фильтров делает строку для -af.
-    Пример одного элемента: { "name": "highpass", "args": {"f": 80} }
+    Строит цепочку ffmpeg аудиофильтров из конфигурации.
+
+    Args:
+        filters_cfg: Список словарей с ключами 'name' и 'args'
+
+    Returns:
+        Строка фильтров для параметра -af в ffmpeg
+
+    Example:
+        >>> cfg = [
+        ...     {"name": "highpass", "args": {"f": 200, "p": 2}},
+        ...     {"name": "lowpass", "args": {"f": 3500}}
+        ... ]
+        >>> build_filter_chain_string(cfg)
+        'highpass=f=200:p=2,lowpass=f=3500'
     """
-    parts: List[str] = []
-    for f in filters_cfg:
-        name = f["name"]
-        args = f.get("args") or {}
+    filter_strings = []
 
-        arg_items: List[str] = []
-        for k, v in args.items():
-            arg_items.append(f"{k}={v}")
+    for flt in filters_cfg:
+        name = flt.get("name")
+        args = flt.get("args", {})
 
-        if arg_items:
-            parts.append(f"{name}=" + ":".join(arg_items))
+        if not name:
+            continue
+
+        if name == "pan" and "args" in args:
+            filter_strings.append(f"pan={args['args']}")
+        elif name == "loudnorm":
+            parts = []
+            if "I" in args:
+                parts.append(f"I={args['I']}")
+            if "LRA" in args:
+                parts.append(f"LRA={args['LRA']}")
+            if "TP" in args:
+                parts.append(f"TP={args['TP']}")
+            filter_strings.append(f"loudnorm={':'.join(parts)}")
+        elif args:
+            arg_parts = [f"{k}={v}" for k, v in args.items() if k != "args"]
+            if arg_parts:
+                filter_strings.append(f"{name}={':'.join(arg_parts)}")
+            else:
+                filter_strings.append(name)
         else:
-            parts.append(name)
+            filter_strings.append(name)
 
-    return ",".join(parts)
+    return ",".join(filter_strings)
