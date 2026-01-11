@@ -124,13 +124,13 @@ python -m voice_cleaner INPUT_PATH OUTPUT_PATH CONFIG_PATH
 
 ```bash
 # Обработка одного файла
-python -m voice_cleaner -i video.mp4 -o clean_video.mp4
+python -m voice_cleaner video.mp4 clean_video.mp4 config.json
 
 # Обработка папки
-python -m voice_cleaner -i ./videos/ -o ./output/
+python -m voice_cleaner ./videos/  ./output/ config.json
 
 # Использование кастомной конфигурации
-python -m voice_cleaner -i video.mp4 -o output.mp4 -c my_config.json
+python -m voice_cleaner  video.mp4  output.mp4  my_config.json
 ```
 
 ## Структура проекта
